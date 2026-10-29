@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#0b0f14">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-512.png">
+<link rel="apple-touch-icon" href="icon-512.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="提词器">
 <title>提词器录像机 · Teleprompter</title>
 <style>
 /* ========== 基础与主题 ========== */
@@ -172,6 +179,28 @@ input[type=range]{ flex:1; accent-color:var(--accent); min-width:110px; }
 #tpBar .val{ color:var(--muted); font-size:12px; min-width:36px; text-align:center; font-variant-numeric:tabular-nums; }
 #tpBar button.on{ background:rgba(34,211,238,.3); color:var(--accent); }
 
+/* ========== 悬浮提词窗（叠在预览画面上，边看边拍） ========== */
+.minor-row{ display:flex; justify-content:center; gap:8px; flex-wrap:wrap; }
+#floatTp{
+  position:absolute; left:7%; top:9%; width:min(86%,340px); max-height:58%;
+  display:flex; flex-direction:column; z-index:20; overflow:hidden;
+  background:rgba(8,12,18,.74); backdrop-filter:blur(8px);
+  border:1px solid rgba(34,211,238,.4); border-radius:12px;
+  box-shadow:0 10px 34px rgba(0,0,0,.55);
+}
+#floatTp[hidden]{ display:none; }
+#ftBar{
+  display:flex; align-items:center; gap:6px; padding:7px 9px; touch-action:none;
+  background:rgba(34,211,238,.14); cursor:move; user-select:none; flex:none;
+}
+#ftBar .grip{ color:var(--accent); font-size:12px; margin-right:auto; letter-spacing:1px; }
+#ftBar button{ background:rgba(255,255,255,.14); color:#fff; border-radius:8px; padding:4px 11px; font-size:12px; font-weight:700; }
+#ftTextWrap{ flex:1; overflow:hidden; position:relative; touch-action:none; min-height:0; }
+#ftText{
+  white-space:pre-wrap; word-break:break-word; color:#fff; font-weight:600;
+  padding:64px 15px 72px; letter-spacing:.5px; will-change:transform;
+}
+
 /* ========== Toast ========== */
 #toast{
   position:fixed; left:50%; bottom:calc(96px + env(safe-area-inset-bottom)); transform:translateX(-50%) translateY(20px);
@@ -200,6 +229,10 @@ input[type=range]{ flex:1; accent-color:var(--accent); min-width:110px; }
         </div>
         <div id="countdown">3</div>
         <div id="recBadge"><span class="dot"></span><span id="recTime">00:00</span></div>
+        <div id="floatTp" hidden>
+          <div id="ftBar"><span class="grip">⠿ 拖动</span><button id="ftPlay">▶</button><button id="ftSmaller">字−</button><button id="ftBigger">字+</button><button id="ftClose">✕</button></div>
+          <div id="ftTextWrap"><div id="ftText"></div></div>
+        </div>
       </div>
 
       <div class="tabs">
@@ -233,6 +266,11 @@ input[type=range]{ flex:1; accent-color:var(--accent); min-width:110px; }
         <button class="ctl-round" id="btnPause" disabled>暂停</button>
         <button class="ctl-round" id="btnStart"><span>开始录制</span></button>
         <button class="ctl-round" id="btnStop" disabled><span class="sq"></span></button>
+      </div>
+
+      <div class="minor-row">
+        <button class="chip" id="btnFloatTp">📖 悬浮提词（边看边拍）</button>
+        <button class="chip" id="btnOpenPrompterTop">📺 全屏提词</button>
       </div>
 
       <div id="dlBar">
@@ -364,7 +402,8 @@ function saveSettings(){
       speed: getSpeed(), fontSize: getFontSize(), line: getLine(),
       tpMirror: $("ckPromptMirror").checked,
       mirrorFront: $("ckMirrorFront").checked,
-      dualLayout, pipSize, pipPos, frontMain
+      dualLayout, pipSize, pipPos, frontMain,
+      ftFontSize, ftLeft, ftTop
     }));
   }catch(e){}
 }
@@ -381,6 +420,9 @@ function loadSettings(){
     if(s.pipSize) pipSize = s.pipSize;
     if(s.pipPos) pipPos = s.pipPos;
     if(typeof s.frontMain === "boolean") frontMain = s.frontMain;
+    if(s.ftFontSize) ftFontSize = s.ftFontSize;
+    if(Number.isFinite(s.ftLeft)) ftLeft = s.ftLeft;
+    if(Number.isFinite(s.ftTop)) ftTop = s.ftTop;
   }catch(e){}
 }
 /* 提词参数的读写统一走函数，便于滑块与提词器内按钮双向同步 */
@@ -570,6 +612,11 @@ function pickMime(){
 function startRecord(){
   if(!granted || (!frontS && !backS)){ toast("请先开启摄像头"); return; }
   if(!window.MediaRecorder || !canvas.captureStream){ toast("当前浏览器不支持录像功能，建议使用新版 Chrome / Edge / Safari"); return; }
+  /* 有台词且悬浮窗未开时，自动开启悬浮提词，方便边看边拍 */
+  if($("scriptArea").value.trim() && ftEl.hidden){
+    openFloatTp(); ftPlaying = true; ftUpdatePlay();
+    toast("已自动开启悬浮提词，开始边看边拍");
+  }
   recState = "countdown"; syncControls(); syncTabs();
   let n = 3; const cd = $("countdown");
   cd.textContent = n; cd.classList.add("show");
@@ -720,6 +767,75 @@ function tpLoop(ts){
 })();
 
 /* =====================================================================
+ * 悬浮提词窗：叠加在预览画面上，边看词边拍（不影响录制画面本身）
+ * ===================================================================== */
+let ftY = 0, ftPlaying = false, ftLast = 0;
+let ftFontSize = 22, ftLeft = null, ftTop = null;
+const ftEl = $("floatTp"), ftText = $("ftText"), ftWrap = $("ftTextWrap");
+
+function ftSyncText(){ ftText.textContent = $("scriptArea").value || "（台词为空，请在下方输入台词）"; }
+function applyFtStyle(){ ftText.style.fontSize = ftFontSize + "px"; ftText.style.lineHeight = getLine(); }
+function ftUpdatePlay(){ $("ftPlay").textContent = ftPlaying ? "⏸" : "▶"; }
+function openFloatTp(){
+  ftSyncText(); applyFtStyle();
+  /* 恢复记忆位置并夹在舞台范围内 */
+  const st = $("stage").getBoundingClientRect();
+  let nx = Number.isFinite(ftLeft) ? ftLeft : st.width * 0.07;
+  let ny = Number.isFinite(ftTop) ? ftTop : st.height * 0.09;
+  nx = Math.max(4, Math.min(st.width - 60, nx));
+  ny = Math.max(4, Math.min(st.height - 60, ny));
+  ftEl.style.left = nx + "px"; ftEl.style.top = ny + "px";
+  ftY = 0; ftPlaying = false; ftUpdatePlay();
+  ftEl.hidden = false;
+  const b = $("btnFloatTp"); b.classList.add("on"); b.textContent = "📖 悬浮提词 · 已开启";
+  ftLast = performance.now(); requestAnimationFrame(ftLoop);
+}
+function closeFloatTp(){
+  ftPlaying = false; ftEl.hidden = true;
+  const b = $("btnFloatTp"); b.classList.remove("on"); b.textContent = "📖 悬浮提词（边看边拍）";
+}
+function ftLoop(ts){
+  if(ftEl.hidden) return;
+  if(ftPlaying){
+    const dt = Math.min(0.1, (ts - ftLast) / 1000);
+    ftY -= getSpeed() * dt;
+    const minY = -(ftText.offsetHeight - ftWrap.clientHeight * 0.72);
+    if(ftY < minY){ ftY = minY; ftPlaying = false; ftUpdatePlay(); toast("悬浮提词已到底部"); }
+    ftText.style.transform = `translateY(${ftY}px)`;
+  }
+  ftLast = ts;
+  requestAnimationFrame(ftLoop);
+}
+/* 文字区域：手势拖动调整进度 */
+(function ftDragText(){
+  let sy = 0, by = 0, drag = false;
+  ftWrap.addEventListener("pointerdown", e => { drag = true; sy = e.clientY; by = ftY; ftWrap.setPointerCapture(e.pointerId); });
+  ftWrap.addEventListener("pointermove", e => { if(!drag) return; ftY = by + (e.clientY - sy); ftText.style.transform = `translateY(${ftY}px)`; });
+  ftWrap.addEventListener("pointerup", () => { if(drag){ drag = false; ftPlaying = false; ftUpdatePlay(); } });
+})();
+/* 工具条：拖动窗口位置（按钮除外） */
+(function ftDragWin(){
+  const bar = $("ftBar");
+  let sx = 0, sy = 0, ox = 0, oy = 0, drag = false;
+  bar.addEventListener("pointerdown", e => {
+    if(e.target.closest("button")) return;
+    drag = true; sx = e.clientX; sy = e.clientY;
+    const r = ftEl.getBoundingClientRect();
+    ox = r.left; oy = r.top; bar.setPointerCapture(e.pointerId);
+  });
+  bar.addEventListener("pointermove", e => {
+    if(!drag) return;
+    const st = $("stage").getBoundingClientRect();
+    let nx = ox + (e.clientX - sx) - st.left;
+    let ny = oy + (e.clientY - sy) - st.top;
+    nx = Math.max(4, Math.min(st.width - ftEl.offsetWidth - 4, nx));
+    ny = Math.max(4, Math.min(st.height - ftEl.offsetHeight - 4, ny));
+    ftEl.style.left = nx + "px"; ftEl.style.top = ny + "px";
+  });
+  bar.addEventListener("pointerup", () => { if(drag){ drag = false; const r = ftEl.getBoundingClientRect(), s = $("stage").getBoundingClientRect(); ftLeft = r.left - s.left; ftTop = r.top - s.top; saveSettings(); } });
+})();
+
+/* =====================================================================
  * 事件绑定
  * ===================================================================== */
 $("btnGrant").addEventListener("click", async () => {
@@ -753,6 +869,12 @@ $("btnStop").addEventListener("click", stopRecord);
 $("fileName").addEventListener("change", e => { $("btnDownload").download = e.target.value.trim() || $("fileName").value; });
 
 $("btnOpenPrompter").addEventListener("click", openPrompter);
+$("btnOpenPrompterTop").addEventListener("click", openPrompter);
+$("btnFloatTp").addEventListener("click", () => ftEl.hidden ? openFloatTp() : closeFloatTp());
+$("ftPlay").addEventListener("click", () => { ftPlaying = !ftPlaying; ftLast = performance.now(); ftUpdatePlay(); });
+$("ftBigger").addEventListener("click", () => { ftFontSize = Math.min(48, ftFontSize + 2); applyFtStyle(); saveSettings(); });
+$("ftSmaller").addEventListener("click", () => { ftFontSize = Math.max(14, ftFontSize - 2); applyFtStyle(); saveSettings(); });
+$("ftClose").addEventListener("click", closeFloatTp);
 $("tpExit").addEventListener("click", closePrompter);
 $("tpPlay").addEventListener("click", () => {
   if(!tpPlaying && tpY >= -($("tpText").offsetHeight - window.innerHeight*0.5) + 2 && tpY > 0){ tpY = 0; }
@@ -768,7 +890,7 @@ $("speedRange").addEventListener("input", e => { setSpeed(+e.target.value); save
 $("fontSizeRange").addEventListener("input", e => { setFontSize(+e.target.value); applyTpStyle(); saveSettings(); });
 $("lineRange").addEventListener("input", e => { setLine(+e.target.value); saveSettings(); });
 $("ckPromptMirror").addEventListener("change", () => { applyTpStyle(); saveSettings(); });
-$("scriptArea").addEventListener("input", saveSettings);
+$("scriptArea").addEventListener("input", () => { saveSettings(); if(!ftEl.hidden) ftSyncText(); });
 
 /* 离开页面时释放设备 */
 window.addEventListener("pagehide", () => { stopStreams(); if(recorder && recorder.state !== "inactive") try{ recorder.stop(); }catch(e){} });
@@ -777,6 +899,11 @@ window.addEventListener("pagehide", () => { stopStreams(); if(recorder && record
 loadSettings();
 applyTpStyle();
 syncTabs(); syncLayoutOpts(); syncControls();
+
+/* ---------- PWA：Service Worker 注册（手机添加到主屏幕后可离线打开） ---------- */
+if("serviceWorker" in navigator && location.protocol.startsWith("http")){
+  navigator.serviceWorker.register("./sw.js").catch(()=>{});
+}
 </script>
 </body>
 </html>
