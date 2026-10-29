@@ -448,16 +448,44 @@ async function openCam(constraints){
     return await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
   }catch(e){ toast(describeErr(e)); throw e; }
 }
+let micStream = null, micKeeper = null;
 async function getMic(){
   try{
-    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if(micTrack && micTrack.readyState === "live") return true; // 已有活音轨，复用
+    if(micStream) micStream.getTracks().forEach(t => t.stop());
+    const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    micStream = s;
     micTrack = s.getAudioTracks()[0];
+    keepMicAlive();
     return true;
   }catch(e){
-    micTrack = null;
+    micTrack = null; micStream = null;
     toast("麦克风不可用，将只录制画面（声音不会录入）");
     return false;
   }
+}
+/* 关键保活：部分安卓浏览器会把"没有消费者"的音轨自动回收（ended/muted），
+   导致录制无声甚至中途停止。接一个静音播放的 audio 元素让系统持续供给数据 */
+function keepMicAlive(){
+  if(!micStream) return;
+  if(!micKeeper){ micKeeper = document.createElement("audio"); micKeeper.muted = true; micKeeper.setAttribute("playsinline", ""); }
+  micKeeper.srcObject = micStream;
+  micKeeper.play().catch(() => {});
+  if(micTrack){
+    micTrack.addEventListener("ended", () => {
+      micTrack = null;
+      if(recState === "rec" || recState === "paused"){
+        toast("麦克风被系统回收，录制已自动保存（画面部分完整）");
+        stopRecord();
+      }else{
+        toast("麦克风待机被回收，下次录制会自动重连");
+      }
+    }, { once: true });
+  }
+}
+/* 录制前确保麦克风音轨是活的，死了就重新取 */
+async function ensureMic(){
+  if(!micTrack || micTrack.readyState !== "live"){ await getMic(); }
 }
 function attach(v, s){ v.srcObject = s; v.play().catch(()=>{}); }
 function stopStreams(){
@@ -474,22 +502,35 @@ function showNoSignal(msg){
 
 /* 切换拍摄模式；录制中禁止切换 */
 async function setMode(m){
-  if(recState !== "idle" && m !== mode){ toast("录制中不能切换视角，请先停止录制"); syncTabs(); return; }
+  const duringRec = (recState === "rec" || recState === "paused");
+  if(m !== mode && duringRec) toast("正在无缝切换视角，录制不中断…");
   mode = m; syncTabs(); syncLayoutOpts();
   stopStreams();
   $("noSignal").style.display = "none";
   try{
     if(m === "dual"){
-      /* 双摄：先后开前摄，再开后摄；任一失败则降级为单摄并明确告知 */
-      try{
-        frontS = await openCam({ facingMode: "user",  width:{ideal:1280}, height:{ideal:720} });
-        backS  = await openCam({ facingMode: "environment", width:{ideal:1280}, height:{ideal:720} });
-        attach(videoFront, frontS); attach(videoBack, backS);
-      }catch(e){
-        stopStreams();
-        toast("当前设备/浏览器无法同时开启前后摄像头（硬件限制），已自动切换为前置单摄。可用「前置」或「后置」分别拍摄。");
+      /* 双摄多轮尝试：很多手机只允许低分辨率并发，或对开启顺序敏感。
+         1) 高清 720p（先前后）  2) 低清 480p（先前后）  3) 480p 交换顺序（先后前） */
+      const plans = [
+        { fb:{ facingMode:"environment", width:{ideal:1280}, height:{ideal:720} }, ff:{ facingMode:"user", width:{ideal:1280}, height:{ideal:720} } },
+        { fb:{ facingMode:"environment", width:{ideal:640},  height:{ideal:480} }, ff:{ facingMode:"user", width:{ideal:640},  height:{ideal:480} } },
+        { fb:{ facingMode:"user",        width:{ideal:640},  height:{ideal:480} }, ff:{ facingMode:"environment", width:{ideal:640}, height:{ideal:480} } },
+      ];
+      let ok = false, lastErr = null;
+      for(const p of plans){
+        try{
+          stopStreams();
+          backS  = await openCam(p.fb);
+          frontS = await openCam(p.ff);
+          attach(videoBack, backS); attach(videoFront, frontS);
+          ok = true; break;
+        }catch(e){ lastErr = e; stopStreams(); }
+      }
+      if(!ok){
+        /* 全部失败：真实硬件限制。降级单摄并告知替代工作流 */
+        toast("本机相机硬件不允许前后摄同时开启。已切回前置单摄；推荐用「录制中点按钮切换视角」实现双机位效果，录制不会中断。" + (lastErr && lastErr.name ? "（" + lastErr.name + "）" : ""));
         mode = "front"; syncTabs(); syncLayoutOpts();
-        frontS = await openCam({ facingMode: "user" });
+        frontS = await openCam({ facingMode: "user", width:{ideal:1280}, height:{ideal:720} });
         attach(videoFront, frontS);
       }
     }else{
@@ -507,8 +548,7 @@ function syncTabs(){
   $("tabFront").classList.toggle("on", mode==="front");
   $("tabBack").classList.toggle("on",  mode==="back");
   $("tabDual").classList.toggle("on",  mode==="dual");
-  const lock = recState !== "idle";
-  ["tabFront","tabBack","tabDual"].forEach(id => $(id).disabled = lock);
+  /* 录制中允许热切换视角（setMode 内部会无缝处理），不再禁用按钮 */
 }
 function syncLayoutOpts(){
   $("layoutOpts").classList.toggle("show", mode==="dual");
@@ -582,32 +622,28 @@ function drawFrame(){
       }
     });
   }else{
+    /* 单摄：固定竖版 720x1280，cover 方式绘制。
+       尺寸恒定的好处：录制中切换前后视角时编码流不重建，视频无缝衔接 */
     const v = mode === "front" ? videoFront : videoBack;
-    const vw = v.videoWidth, vh = v.videoHeight;
-    if(vw && vh && v.readyState >= 2){
-      if(canvas.width !== vw) canvas.width = vw;
-      if(canvas.height !== vh) canvas.height = vh;
-      ctx.save();
-      const mirror = mode === "front" && $("ckMirrorFront").checked;
-      if(mirror){ ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
-      ctx.drawImage(v, 0, 0);
-      ctx.restore();
-    }
+    const W = 720, H = 1280;
+    if(canvas.width !== W) canvas.width = W;
+    if(canvas.height !== H) canvas.height = H;
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+    drawCover(ctx, v, 0, 0, W, H, mode === "front" && $("ckMirrorFront").checked);
   }
 }
 
 /* =====================================================================
  * 录制：倒计时 → MediaRecorder → Blob → 自动下载
  * ===================================================================== */
+/* iOS 走 mp4（Safari 原生支持），安卓统一走 webm——
+   部分安卓内核（如部分国产手机自带浏览器）的 mp4 录制有"只录 1 秒"的 bug */
+const IS_IOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 function pickMime(){
-  const list = [
-    "video/mp4;codecs=avc1.42E01E,mp4a.40.2", // Safari/部分安卓支持 mp4
-    "video/mp4",
-    "video/webm;codecs=vp9,opus",
-    "video/webm;codecs=vp8,opus",
-    "video/webm"
-  ];
-  return list.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+  const cands = IS_IOS
+    ? ["video/mp4;codecs=avc1.42E01E,mp4a.40.2", "video/mp4"]
+    : ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp9,opus", "video/webm"];
+  return cands.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
 }
 function startRecord(){
   if(!granted || (!frontS && !backS)){ toast("请先开启摄像头"); return; }
@@ -630,7 +666,8 @@ function cancelCountdown(){
   clearInterval(cdTimer); $("countdown").classList.remove("show");
   recState = "idle"; syncControls(); syncTabs();
 }
-function doStartRecord(){
+async function doStartRecord(){
+  await ensureMic(); // 音轨若被系统回收，此时自动重连
   const vs = canvas.captureStream(30); // 合成画面的实时视频流
   const tracks = [...vs.getVideoTracks()];
   if(micTrack) tracks.push(micTrack);
@@ -638,13 +675,25 @@ function doStartRecord(){
   recMime = pickMime();
   try{
     recorder = new MediaRecorder(recStream, recMime
-      ? { mimeType: recMime, videoBitsPerSecond: 5_000_000 }
-      : { videoBitsPerSecond: 5_000_000 });
-  }catch(e){ toast("录像初始化失败：" + e.message); recState="idle"; syncControls(); return; }
+      ? { mimeType: recMime, videoBitsPerSecond: 5000000 }
+      : { videoBitsPerSecond: 5000000 });
+  }catch(e){ toast("录像初始化失败：" + e.message); recState = "idle"; syncControls(); return; }
   chunks = [];
   recorder.ondataavailable = e => { if(e.data && e.data.size) chunks.push(e.data); };
   recorder.onstop = onRecStop;
-  recorder.start(1000);
+  recorder.onerror = e => {
+    toast("录制出错：" + ((e.error && e.error.name) || "未知") + "，已自动保存已录部分");
+    if(recState !== "idle") stopRecord();
+  };
+  /* 任何一路信号（画面/声音）被系统掐断时，优雅收尾而不是产出损坏文件 */
+  recStream.getTracks().forEach(t => t.addEventListener("ended", () => {
+    if(recState === "rec" || recState === "paused"){
+      toast("信号中断，录制已自动保存");
+      stopRecord();
+    }
+  }, { once: true }));
+  /* 不带时间片一次性收包：兼容性最好，避免个别安卓内核对周期分片的兼容 bug */
+  recorder.start();
   recState = "rec"; recElapsed = 0; recStartTs = Date.now();
   startTimer(); syncControls(); syncTabs();
   toast("开始录制" + (micTrack ? "（含麦克风声音）" : "（注意：无麦克风，仅画面）"));
