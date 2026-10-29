@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0f14">
+<title>提词器录像机 · Teleprompter</title>
+<style>
+/* ========== 基础与主题 ========== */
+*{ box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent; }
+:root{
+  --bg:#0b0f14; --panel:#131a23; --panel2:#1a2330; --line:#243040;
+  --text:#e8eef5; --muted:#8b9bb0; --accent:#22d3ee; --accent-dim:#0e7490;
+  --red:#ef4444; --amber:#f59e0b; --green:#10b981;
+  --radius:14px;
+}
+html,body{ height:100%; }
+body{
+  background:var(--bg); color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  overscroll-behavior:none;
+}
+button{ font-family:inherit; cursor:pointer; border:none; }
+button:disabled{ opacity:.35; cursor:not-allowed; }
+input,textarea{ font-family:inherit; }
+.app{ display:flex; flex-direction:column; min-height:100dvh; }
+
+/* ========== 顶栏与环境横幅 ========== */
+header{ padding:14px 16px 6px; display:flex; align-items:baseline; gap:10px; }
+header h1{ font-size:18px; font-weight:700; letter-spacing:.5px; }
+header span{ font-size:12px; color:var(--muted); }
+#banner{ margin:8px 14px 0; padding:10px 12px; border-radius:10px; font-size:13px; line-height:1.6; display:none; }
+#banner.warn{ display:block; background:rgba(245,158,11,.12); color:#fbbf24; border:1px solid rgba(245,158,11,.35); }
+#banner.err{ display:block; background:rgba(239,68,68,.12); color:#fca5a5; border:1px solid rgba(239,68,68,.4); }
+
+/* ========== 主布局：移动竖屏单栏 / 桌面双栏 ========== */
+main{ flex:1; display:flex; flex-direction:column; gap:14px; padding:12px 14px calc(20px + env(safe-area-inset-bottom)); max-width:1100px; width:100%; margin:0 auto; }
+@media (min-width:960px){
+  main{ display:grid; grid-template-columns:minmax(0,1.15fr) minmax(340px,.85fr); align-items:start; }
+}
+
+/* ========== 预览舞台 ========== */
+.stage-wrap{ display:flex; flex-direction:column; gap:12px; }
+#stage{
+  position:relative; background:#000; border-radius:var(--radius); overflow:hidden;
+  height:min(52dvh,520px); display:flex; align-items:center; justify-content:center;
+  border:1px solid var(--line);
+}
+#previewCanvas{ max-width:100%; max-height:100%; display:block; }
+/* video 元素保持"可见"但缩到角落，避免 iOS 下 display:none 不解码 */
+.cam-src{ position:absolute; left:0; bottom:0; width:2px; height:2px; opacity:0; pointer-events:none; }
+#noSignal{
+  position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:14px; text-align:center; padding:20px; color:var(--muted); font-size:14px; line-height:1.7;
+}
+#noSignalText{ max-width:320px; }
+#btnGrant{
+  background:linear-gradient(135deg,#22d3ee,#0891b2); color:#04222b; font-weight:700; font-size:16px;
+  padding:14px 30px; border-radius:999px; box-shadow:0 6px 20px rgba(34,211,238,.35);
+}
+#countdown{
+  position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.55); font-size:110px; font-weight:800; color:var(--red);
+  text-shadow:0 4px 30px rgba(239,68,68,.6);
+}
+#countdown.show{ display:flex; animation:pop 1s ease infinite; }
+@keyframes pop{ 0%{transform:scale(1.25);opacity:1} 100%{transform:scale(.85);opacity:.55} }
+#recBadge{
+  position:absolute; top:10px; left:10px; display:none; align-items:center; gap:8px;
+  background:rgba(0,0,0,.55); backdrop-filter:blur(6px); border-radius:999px; padding:6px 14px;
+  font-size:14px; font-weight:700; font-variant-numeric:tabular-nums;
+}
+#recBadge.show{ display:flex; }
+#recBadge .dot{ width:10px; height:10px; border-radius:50%; background:var(--red); animation:blink 1s steps(2) infinite; }
+#recBadge.paused .dot{ background:var(--amber); animation:none; }
+@keyframes blink{ 50%{opacity:.15} }
+
+/* ========== 模式切换 ========== */
+.tabs{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.tabs button{
+  padding:13px 6px; border-radius:12px; background:var(--panel); color:var(--muted);
+  font-size:15px; font-weight:600; border:1px solid var(--line); transition:.15s;
+}
+.tabs button.on{ background:var(--panel2); color:var(--accent); border-color:var(--accent-dim); box-shadow:inset 0 0 0 1px rgba(34,211,238,.25); }
+
+/* ========== 双摄布局选项 ========== */
+#layoutOpts{ display:none; flex-direction:column; gap:10px; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:12px; }
+#layoutOpts.show{ display:flex; }
+.opt-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.opt-label{ font-size:13px; color:var(--muted); min-width:70px; }
+.chip{
+  padding:8px 14px; border-radius:999px; background:var(--panel2); color:var(--muted);
+  font-size:13px; border:1px solid var(--line);
+}
+.chip.on{ color:var(--accent); border-color:var(--accent-dim); background:rgba(34,211,238,.08); }
+.switch{ position:relative; width:46px; height:26px; flex:none; }
+.switch input{ opacity:0; width:100%; height:100%; position:absolute; z-index:2; margin:0; }
+.switch i{ position:absolute; inset:0; background:var(--panel2); border:1px solid var(--line); border-radius:999px; transition:.2s; }
+.switch i::after{ content:""; position:absolute; top:2px; left:2px; width:20px; height:20px; border-radius:50%; background:var(--muted); transition:.2s; }
+.switch input:checked + i{ background:rgba(34,211,238,.25); border-color:var(--accent-dim); }
+.switch input:checked + i::after{ left:22px; background:var(--accent); }
+input[type=range]{ flex:1; accent-color:var(--accent); min-width:110px; }
+
+/* ========== 录制控制 ========== */
+.controls{ display:flex; align-items:center; justify-content:center; gap:26px; padding:4px 0; }
+.ctl-round{
+  border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700;
+  background:var(--panel2); color:var(--text); border:2px solid var(--line); transition:.15s;
+}
+#btnStart{ width:76px; height:76px; font-size:14px; color:#fff; background:radial-gradient(circle at 35% 30%,#f87171,#dc2626); border-color:#b91c1c; box-shadow:0 6px 22px rgba(239,68,68,.4); }
+#btnStart.count{ background:var(--panel2); color:var(--amber); border-color:var(--line); box-shadow:none; }
+#btnStart.count::before{ content:"取消"; font-size:14px; }
+#btnStart.count span{ display:none; }
+#btnPause,#btnStop{ width:56px; height:56px; font-size:12px; }
+#btnStop:enabled{ color:#fca5a5; }
+#btnStop .sq{ width:18px; height:18px; background:#fca5a5; border-radius:4px; }
+
+/* ========== 下载条 ========== */
+#dlBar{ display:none; flex-direction:column; gap:10px; background:rgba(16,185,129,.08); border:1px solid rgba(16,185,129,.35); border-radius:var(--radius); padding:12px; }
+#dlBar.show{ display:flex; }
+#dlInfo{ font-size:13px; color:#6ee7b7; word-break:break-all; }
+#dlBar .row{ display:flex; gap:8px; }
+#fileName{ flex:1; background:var(--panel2); border:1px solid var(--line); color:var(--text); border-radius:10px; padding:10px 12px; font-size:14px; min-width:0; }
+#btnDownload{ background:var(--green); color:#03291c; font-weight:700; border-radius:10px; padding:10px 18px; font-size:14px; text-decoration:none; display:flex; align-items:center; }
+
+/* ========== 台词面板 ========== */
+.script-panel{ display:flex; flex-direction:column; gap:12px; }
+.panel{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:14px; }
+.panel h2{ font-size:14px; color:var(--muted); font-weight:600; margin-bottom:10px; letter-spacing:1px; }
+#scriptArea{
+  width:100%; min-height:150px; resize:vertical; background:var(--panel2); border:1px solid var(--line);
+  border-radius:10px; color:var(--text); padding:12px; font-size:15px; line-height:1.8;
+}
+#scriptArea:focus{ outline:none; border-color:var(--accent-dim); }
+.slider-row{ display:flex; align-items:center; gap:10px; margin:10px 0; }
+.slider-row .opt-label{ min-width:56px; }
+.slider-row output{ font-size:12px; color:var(--accent); min-width:52px; text-align:right; font-variant-numeric:tabular-nums; }
+#btnOpenPrompter{
+  background:linear-gradient(135deg,#22d3ee,#0891b2); color:#04222b; font-weight:700; font-size:16px;
+  padding:15px; border-radius:12px; box-shadow:0 6px 18px rgba(34,211,238,.3);
+}
+.hint{ font-size:12px; color:var(--muted); line-height:1.7; }
+
+/* ========== 全屏提词器 ========== */
+#tpOverlay{ position:fixed; inset:0; z-index:60; background:#000; display:none; flex-direction:column; }
+#tpOverlay.show{ display:flex; }
+#tpMirrorWrap{ flex:1; overflow:hidden; position:relative; touch-action:none; }
+#tpScroll{ position:absolute; left:0; right:0; top:0; will-change:transform; }
+#tpText{
+  white-space:pre-wrap; word-break:break-word; color:#fff; text-align:left;
+  padding:50vh 7vw 50vh; font-weight:600; letter-spacing:1px;
+}
+#tpTop{
+  position:absolute; top:0; left:0; right:0; padding:calc(10px + env(safe-area-inset-top)) 14px 10px;
+  display:flex; align-items:center; gap:10px; z-index:5;
+  background:linear-gradient(rgba(0,0,0,.75),transparent);
+}
+#tpRecBadge{ display:none; align-items:center; gap:7px; font-size:13px; font-weight:700; font-variant-numeric:tabular-nums; }
+#tpRecBadge.show{ display:flex; }
+#tpRecBadge .dot{ width:9px; height:9px; border-radius:50%; background:var(--red); animation:blink 1s steps(2) infinite; }
+#tpExit{ margin-left:auto; background:rgba(255,255,255,.12); color:#fff; border-radius:999px; padding:8px 16px; font-size:13px; }
+#tpBar{
+  position:absolute; bottom:0; left:0; right:0; z-index:5;
+  padding:12px 10px calc(14px + env(safe-area-inset-bottom));
+  display:flex; align-items:center; justify-content:center; gap:6px; flex-wrap:wrap;
+  background:linear-gradient(transparent,rgba(0,0,0,.85));
+}
+#tpBar button{
+  background:rgba(255,255,255,.12); color:#fff; border-radius:999px; padding:11px 15px; font-size:14px; font-weight:600;
+}
+#tpBar button.primary{ background:var(--accent); color:#04222b; }
+#tpBar .val{ color:var(--muted); font-size:12px; min-width:36px; text-align:center; font-variant-numeric:tabular-nums; }
+#tpBar button.on{ background:rgba(34,211,238,.3); color:var(--accent); }
+
+/* ========== Toast ========== */
+#toast{
+  position:fixed; left:50%; bottom:calc(96px + env(safe-area-inset-bottom)); transform:translateX(-50%) translateY(20px);
+  background:rgba(20,26,35,.95); border:1px solid var(--line); color:var(--text);
+  padding:12px 20px; border-radius:999px; font-size:14px; z-index:99; opacity:0; pointer-events:none;
+  transition:.25s; max-width:86vw; text-align:center; box-shadow:0 8px 30px rgba(0,0,0,.5);
+}
+#toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header><h1>提词器录像机</h1><span>Teleprompter · 双摄录像</span></header>
+  <div id="banner"></div>
+
+  <main>
+    <!-- ============ 左侧：预览与录制 ============ -->
+    <section class="stage-wrap">
+      <div id="stage">
+        <video id="videoFront" class="cam-src" playsinline muted autoplay></video>
+        <video id="videoBack"  class="cam-src" playsinline muted autoplay></video>
+        <canvas id="previewCanvas"></canvas>
+        <div id="noSignal">
+          <div id="noSignalText">点击下方按钮，授权开启摄像头与麦克风<br>（画面仅本地处理，不会上传）</div>
+          <button id="btnGrant">开启摄像头与麦克风</button>
+        </div>
+        <div id="countdown">3</div>
+        <div id="recBadge"><span class="dot"></span><span id="recTime">00:00</span></div>
+      </div>
+
+      <div class="tabs">
+        <button id="tabFront" class="on">🤳 前置自拍</button>
+        <button id="tabBack">🏔 后置拍景</button>
+        <button id="tabDual">🎬 双视角</button>
+      </div>
+
+      <div id="layoutOpts">
+        <div class="opt-row">
+          <span class="opt-label">画面布局</span>
+          <button class="chip on" id="btnLayoutStack">上下分屏</button>
+          <button class="chip" id="btnLayoutSide">左右分屏</button>
+          <button class="chip" id="btnLayoutPip">画中画</button>
+        </div>
+        <div class="opt-row" id="pipRow">
+          <span class="opt-label">小窗位置</span>
+          <button class="chip" id="btnPipPos">左上 ↻</button>
+          <span class="opt-label">小窗大小</span>
+          <input type="range" id="pipSize" min="0.15" max="0.45" step="0.05" value="0.25">
+          <button class="chip" id="btnSwap">主副互换</button>
+        </div>
+        <div class="opt-row">
+          <span class="opt-label">前置画面镜像</span>
+          <label class="switch"><input type="checkbox" id="ckMirrorFront" checked><i></i></label>
+          <span class="hint">开启后成片里前置画面也是镜像（所见即所得）</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="ctl-round" id="btnPause" disabled>暂停</button>
+        <button class="ctl-round" id="btnStart"><span>开始录制</span></button>
+        <button class="ctl-round" id="btnStop" disabled><span class="sq"></span></button>
+      </div>
+
+      <div id="dlBar">
+        <div id="dlInfo"></div>
+        <div class="row">
+          <input id="fileName" type="text">
+          <a id="btnDownload" href="#" download>⬇ 保存到本地</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 右侧：台词与提词设置 ============ -->
+    <aside class="script-panel">
+      <div class="panel">
+        <h2>台词稿</h2>
+        <textarea id="scriptArea" placeholder="在这里粘贴或输入你的台词……&#10;&#10;输入后会自动保存，可随时进入全屏提词模式。"></textarea>
+      </div>
+      <div class="panel">
+        <h2>提词设置</h2>
+        <div class="slider-row">
+          <span class="opt-label">滚动速度</span>
+          <input type="range" id="speedRange" min="10" max="300" step="5" value="70">
+          <output id="speedVal">70</output>
+        </div>
+        <div class="slider-row">
+          <span class="opt-label">字号</span>
+          <input type="range" id="fontSizeRange" min="20" max="72" step="2" value="34">
+          <output id="fontSizeVal">34</output>
+        </div>
+        <div class="slider-row">
+          <span class="opt-label">行距</span>
+          <input type="range" id="lineRange" min="1.2" max="2.6" step="0.1" value="1.6">
+          <output id="lineVal">1.6</output>
+        </div>
+        <div class="slider-row">
+          <span class="opt-label">提词镜像</span>
+          <label class="switch"><input type="checkbox" id="ckPromptMirror"><i></i></label>
+          <span class="hint">左右翻转文字，适配外接反射镜</span>
+        </div>
+      </div>
+      <button id="btnOpenPrompter">📺 进入全屏提词模式</button>
+      <p class="hint">💡 双视角录制时建议把手机竖放：后摄拍人/景，前摄小窗对着自己；录制中也可随时调整分屏布局。</p>
+    </aside>
+  </main>
+</div>
+
+<!-- ============ 全屏提词器 ============ -->
+<div id="tpOverlay">
+  <div id="tpMirrorWrap">
+    <div id="tpScroll"><div id="tpText"></div></div>
+  </div>
+  <div id="tpTop">
+    <span id="tpRecBadge"><span class="dot"></span><span id="tpTime">00:00</span></span>
+    <button id="tpExit">✕ 退出提词</button>
+  </div>
+  <div id="tpBar">
+    <button id="tpPlay" class="primary">▶ 播放</button>
+    <button id="tpSlower">速−</button><span class="val" id="tpSpeedVal">70</span><button id="tpFaster">速+</button>
+    <button id="tpSmaller">字−</button><span class="val" id="tpFsVal">34</span><button id="tpBigger">字+</button>
+    <button id="tpMirror">镜像</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* =====================================================================
+ * 提词器录像机 —— 纯前端单文件实现
+ * 模块：环境检测 / 相机管理 / Canvas 合成 / 录制 / 下载 / 提词器 / 设置持久化
+ * ===================================================================== */
+"use strict";
+const $ = id => document.getElementById(id);
+
+/* ---------- 全局状态 ---------- */
+let mode = "front";              // front | back | dual
+let recState = "idle";           // idle | countdown | rec | paused
+let dualLayout = "stack";        // stack | side | pip
+let pipPos = "tl";               // tl | tr | bl | br
+let pipSize = 0.25;
+let frontMain = false;           // 双视角：false=后摄为主画面，true=前摄为主画面
+let frontS = null, backS = null; // 两路视频流
+let micTrack = null;             // 麦克风音轨（全局仅一路，避免双份收音）
+let recorder = null, chunks = [], recMime = "";
+let recStream = null, dlUrl = null;
+let recStartTs = 0, recElapsed = 0, timer = null, cdTimer = null;
+let granted = false;
+let renderOn = false;
+
+const canvas = $("previewCanvas");
+const ctx = canvas.getContext("2d");
+const videoFront = $("videoFront"), videoBack = $("videoBack");
+
+/* ---------- 工具 ---------- */
+let toastTimer = null;
+function toast(msg){
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(()=>t.classList.remove("show"), 3200);
+}
+function fmtMs(ms){
+  const s = Math.floor(ms/1000);
+  return String(Math.floor(s/60)).padStart(2,"0") + ":" + String(s%60).padStart(2,"0");
+}
+function stamp(){
+  const d = new Date(), p = n=>String(n).padStart(2,"0");
+  return `提词器录像_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/* ---------- 环境检测：摄像头需要安全上下文 ---------- */
+(function checkEnv(){
+  const host = location.hostname;
+  const isLocal = ["localhost","127.0.0.1","[::1]"].includes(host);
+  const b = $("banner");
+  if(location.protocol === "https:" || isLocal){ return; }
+  if(location.protocol === "file:"){
+    b.className = "warn";
+    b.textContent = "提示：当前以本地文件方式打开。多数浏览器可用，但个别浏览器会限制摄像头。若无法授权，请在文件夹中运行  python -m http.server  后访问 http://localhost:8000";
+  }else{
+    b.className = "err";
+    b.textContent = "警告：浏览器仅在 HTTPS 或 localhost 下允许调用摄像头。请使用 HTTPS 部署，或在本机运行  python -m http.server  后访问 http://localhost:8000";
+  }
+})();
+
+/* ---------- 设置持久化 ---------- */
+const SKEY = "tp_settings_v1";
+function saveSettings(){
+  try{
+    localStorage.setItem(SKEY, JSON.stringify({
+      script: $("scriptArea").value,
+      speed: getSpeed(), fontSize: getFontSize(), line: getLine(),
+      tpMirror: $("ckPromptMirror").checked,
+      mirrorFront: $("ckMirrorFront").checked,
+      dualLayout, pipSize, pipPos, frontMain
+    }));
+  }catch(e){}
+}
+function loadSettings(){
+  try{
+    const s = JSON.parse(localStorage.getItem(SKEY) || "{}");
+    if(typeof s.script === "string") $("scriptArea").value = s.script;
+    if(s.speed) setSpeed(s.speed);
+    if(s.fontSize) setFontSize(s.fontSize);
+    if(s.line) setLine(s.line);
+    if(typeof s.tpMirror === "boolean") $("ckPromptMirror").checked = s.tpMirror;
+    if(typeof s.mirrorFront === "boolean") $("ckMirrorFront").checked = s.mirrorFront;
+    if(s.dualLayout) dualLayout = s.dualLayout;
+    if(s.pipSize) pipSize = s.pipSize;
+    if(s.pipPos) pipPos = s.pipPos;
+    if(typeof s.frontMain === "boolean") frontMain = s.frontMain;
+  }catch(e){}
+}
+/* 提词参数的读写统一走函数，便于滑块与提词器内按钮双向同步 */
+const getSpeed    = () => +$("speedRange").value;
+const getFontSize = () => +$("fontSizeRange").value;
+const getLine     = () => +$("lineRange").value;
+function setSpeed(v){ v=Math.min(300,Math.max(10,v)); $("speedRange").value=v; $("speedVal").textContent=v; $("tpSpeedVal").textContent=v; }
+function setFontSize(v){ v=Math.min(72,Math.max(20,v)); $("fontSizeRange").value=v; $("fontSizeVal").textContent=v; $("tpFsVal").textContent=v; }
+function setLine(v){ $("lineRange").value=v; $("lineVal").textContent=v; }
+
+/* =====================================================================
+ * 相机管理
+ * ===================================================================== */
+function describeErr(e){
+  if(e && e.name === "NotAllowedError") return "摄像头/麦克风权限被拒绝。请在浏览器地址栏的权限图标或系统设置中允许后，刷新重试。";
+  if(e && e.name === "NotFoundError")  return "没有找到可用摄像头。请检查设备连接。";
+  if(e && e.name === "NotReadableError") return "摄像头被其他应用占用。请关闭视频会议/相机等应用后重试。";
+  if(e && e.name === "OverconstrainedError") return "该设备没有对应的前/后摄像头。";
+  return "摄像头开启失败：" + (e && e.message ? e.message : "未知错误");
+}
+async function openCam(constraints){
+  try{
+    return await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+  }catch(e){ toast(describeErr(e)); throw e; }
+}
+async function getMic(){
+  try{
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micTrack = s.getAudioTracks()[0];
+    return true;
+  }catch(e){
+    micTrack = null;
+    toast("麦克风不可用，将只录制画面（声音不会录入）");
+    return false;
+  }
+}
+function attach(v, s){ v.srcObject = s; v.play().catch(()=>{}); }
+function stopStreams(){
+  renderOn = false;
+  [frontS, backS].forEach(s => s && s.getTracks().forEach(t=>t.stop()));
+  frontS = backS = null;
+  videoFront.srcObject = videoBack.srcObject = null;
+}
+function showNoSignal(msg){
+  $("noSignal").style.display = "flex";
+  $("noSignalText").textContent = msg;
+  $("btnGrant").style.display = "none";
+}
+
+/* 切换拍摄模式；录制中禁止切换 */
+async function setMode(m){
+  if(recState !== "idle" && m !== mode){ toast("录制中不能切换视角，请先停止录制"); syncTabs(); return; }
+  mode = m; syncTabs(); syncLayoutOpts();
+  stopStreams();
+  $("noSignal").style.display = "none";
+  try{
+    if(m === "dual"){
+      /* 双摄：先后开前摄，再开后摄；任一失败则降级为单摄并明确告知 */
+      try{
+        frontS = await openCam({ facingMode: "user",  width:{ideal:1280}, height:{ideal:720} });
+        backS  = await openCam({ facingMode: "environment", width:{ideal:1280}, height:{ideal:720} });
+        attach(videoFront, frontS); attach(videoBack, backS);
+      }catch(e){
+        stopStreams();
+        toast("当前设备/浏览器无法同时开启前后摄像头（硬件限制），已自动切换为前置单摄。可用「前置」或「后置」分别拍摄。");
+        mode = "front"; syncTabs(); syncLayoutOpts();
+        frontS = await openCam({ facingMode: "user" });
+        attach(videoFront, frontS);
+      }
+    }else{
+      const s = await openCam({ facingMode: m === "front" ? "user" : "environment", width:{ideal:1280}, height:{ideal:720} });
+      if(m === "front"){ frontS = s; attach(videoFront, s); }
+      else{ backS = s; attach(videoBack, s); }
+    }
+    granted = true;
+    startRenderLoop();
+  }catch(e){
+    showNoSignal(describeErr(e));
+  }
+}
+function syncTabs(){
+  $("tabFront").classList.toggle("on", mode==="front");
+  $("tabBack").classList.toggle("on",  mode==="back");
+  $("tabDual").classList.toggle("on",  mode==="dual");
+  const lock = recState !== "idle";
+  ["tabFront","tabBack","tabDual"].forEach(id => $(id).disabled = lock);
+}
+function syncLayoutOpts(){
+  $("layoutOpts").classList.toggle("show", mode==="dual");
+  $("btnLayoutStack").classList.toggle("on", dualLayout==="stack");
+  $("btnLayoutSide").classList.toggle("on",  dualLayout==="side");
+  $("btnLayoutPip").classList.toggle("on",   dualLayout==="pip");
+  $("pipRow").style.visibility = dualLayout==="pip" ? "visible" : "hidden";
+  const map = { tl:"左上", tr:"右上", bl:"左下", br:"右下" };
+  $("btnPipPos").textContent = map[pipPos] + " ↻";
+  $("pipSize").value = pipSize;
+}
+
+/* =====================================================================
+ * Canvas 合成（预览 = 成片）
+ * ===================================================================== */
+function startRenderLoop(){
+  if(renderOn) return;
+  renderOn = true;
+  requestAnimationFrame(loop);
+}
+function loop(){ if(!renderOn) return; drawFrame(); requestAnimationFrame(loop); }
+
+/* 按 cover 方式把视频画进目标矩形（可镜像），不变形不留黑边 */
+function drawCover(c, v, x, y, w, h, mirror){
+  const vw = v.videoWidth, vh = v.videoHeight;
+  if(!vw || !vh || v.readyState < 2) return;
+  c.save();
+  c.beginPath(); c.rect(x,y,w,h); c.clip();
+  const s = Math.max(w/vw, h/vh), dw = vw*s, dh = vh*s;
+  const dx = x + (w-dw)/2, dy = y + (h-dh)/2;
+  if(mirror){ c.translate(x + w, 0); c.scale(-1, 1); c.drawImage(v, x + w - dx - dw, dy, dw, dh); }
+  else{ c.drawImage(v, dx, dy, dw, dh); }
+  c.restore();
+}
+/* 双视角布局计算：返回 canvas 尺寸与每一路的目标矩形 */
+function layoutRects(){
+  const mf = $("ckMirrorFront").checked;
+  if(dualLayout === "stack"){ // 竖版 9:16，上下各半
+    const w=720, h=1280, half=h/2;
+    return { w, h, rects:[
+      { v:videoFront, x:0, y:0,    w, h:half, mirror:mf },
+      { v:videoBack,  x:0, y:half, w, h:half, mirror:false } ] };
+  }
+  if(dualLayout === "side"){ // 横版 16:9，左右各半
+    const w=1280, h=720, half=w/2;
+    return { w, h, rects:[
+      { v:videoFront, x:0,    y:0, w:half, h, mirror:mf },
+      { v:videoBack,  x:half, y:0, w:half, h, mirror:false } ] };
+  }
+  /* 画中画：主画面全屏 + 四角小窗（4:3） */
+  const w=720, h=1280, m=24;
+  const pw = Math.round(w * pipSize), ph = Math.round(pw * 0.75);
+  const pos = { tl:[m,m], tr:[w-m-pw,m], bl:[m,h-m-ph], br:[w-m-pw,h-m-ph] }[pipPos];
+  const mainV = frontMain ? videoFront : videoBack;
+  const pipV  = frontMain ? videoBack  : videoFront;
+  return { w, h, rects:[
+    { v:mainV, x:0, y:0, w, h, mirror: frontMain ? mf : false },
+    { v:pipV, x:pos[0], y:pos[1], w:pw, h:ph, mirror: frontMain ? false : mf, pip:true } ] };
+}
+function drawFrame(){
+  if(mode === "dual"){
+    const L = layoutRects();
+    if(canvas.width !== L.w) canvas.width = L.w;
+    if(canvas.height !== L.h) canvas.height = L.h;
+    ctx.fillStyle = "#000"; ctx.fillRect(0,0,L.w,L.h);
+    L.rects.forEach(r => {
+      drawCover(ctx, r.v, r.x, r.y, r.w, r.h, r.mirror);
+      if(r.pip){ // 小窗描边，视觉更清晰
+        ctx.save(); ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.lineWidth = 4;
+        ctx.strokeRect(r.x+2, r.y+2, r.w-4, r.h-4); ctx.restore();
+      }
+    });
+  }else{
+    const v = mode === "front" ? videoFront : videoBack;
+    const vw = v.videoWidth, vh = v.videoHeight;
+    if(vw && vh && v.readyState >= 2){
+      if(canvas.width !== vw) canvas.width = vw;
+      if(canvas.height !== vh) canvas.height = vh;
+      ctx.save();
+      const mirror = mode === "front" && $("ckMirrorFront").checked;
+      if(mirror){ ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
+      ctx.drawImage(v, 0, 0);
+      ctx.restore();
+    }
+  }
+}
+
+/* =====================================================================
+ * 录制：倒计时 → MediaRecorder → Blob → 自动下载
+ * ===================================================================== */
+function pickMime(){
+  const list = [
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2", // Safari/部分安卓支持 mp4
+    "video/mp4",
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm"
+  ];
+  return list.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+}
+function startRecord(){
+  if(!granted || (!frontS && !backS)){ toast("请先开启摄像头"); return; }
+  if(!window.MediaRecorder || !canvas.captureStream){ toast("当前浏览器不支持录像功能，建议使用新版 Chrome / Edge / Safari"); return; }
+  recState = "countdown"; syncControls(); syncTabs();
+  let n = 3; const cd = $("countdown");
+  cd.textContent = n; cd.classList.add("show");
+  cdTimer = setInterval(()=>{
+    n--;
+    if(n <= 0){ clearInterval(cdTimer); cd.classList.remove("show"); doStartRecord(); }
+    else cd.textContent = n;
+  }, 1000);
+}
+function cancelCountdown(){
+  clearInterval(cdTimer); $("countdown").classList.remove("show");
+  recState = "idle"; syncControls(); syncTabs();
+}
+function doStartRecord(){
+  const vs = canvas.captureStream(30); // 合成画面的实时视频流
+  const tracks = [...vs.getVideoTracks()];
+  if(micTrack) tracks.push(micTrack);
+  recStream = new MediaStream(tracks);
+  recMime = pickMime();
+  try{
+    recorder = new MediaRecorder(recStream, recMime
+      ? { mimeType: recMime, videoBitsPerSecond: 5_000_000 }
+      : { videoBitsPerSecond: 5_000_000 });
+  }catch(e){ toast("录像初始化失败：" + e.message); recState="idle"; syncControls(); return; }
+  chunks = [];
+  recorder.ondataavailable = e => { if(e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = onRecStop;
+  recorder.start(1000);
+  recState = "rec"; recElapsed = 0; recStartTs = Date.now();
+  startTimer(); syncControls(); syncTabs();
+  toast("开始录制" + (micTrack ? "（含麦克风声音）" : "（注意：无麦克风，仅画面）"));
+}
+function pauseRecord(){
+  if(recorder && recorder.state === "recording"){
+    recorder.pause();
+    recElapsed += Date.now() - recStartTs;
+    recState = "paused"; syncControls();
+  }
+}
+function resumeRecord(){
+  if(recorder && recorder.state === "paused"){
+    recorder.resume();
+    recStartTs = Date.now();
+    recState = "rec"; syncControls();
+  }
+}
+function stopRecord(){
+  if(recState === "countdown"){ cancelCountdown(); return; }
+  if(!recorder) return;
+  if(recState === "rec") recElapsed += Date.now() - recStartTs;
+  try{ recorder.stop(); }catch(e){}
+  recState = "idle"; stopTimer(); syncControls(); syncTabs();
+}
+function startTimer(){
+  stopTimer();
+  timer = setInterval(()=>{
+    const ms = recState === "rec" ? recElapsed + (Date.now() - recStartTs) : recElapsed;
+    $("recTime").textContent = fmtMs(ms);
+    $("tpTime").textContent  = fmtMs(ms);
+  }, 250);
+  $("recTime").textContent = "00:00"; $("tpTime").textContent = "00:00";
+}
+function stopTimer(){ clearInterval(timer); timer = null; }
+
+/* 录制结束：合成单个视频文件 → 自动触发下载 */
+function onRecStop(){
+  const type = (recorder && recorder.mimeType) || recMime || "video/webm";
+  const blob = new Blob(chunks, { type });
+  chunks = [];
+  if(blob.size === 0){ toast("没有录制到内容，请重试"); return; }
+  const ext = type.includes("mp4") ? "mp4" : "webm";
+  const name = stamp() + "." + ext;
+  if(dlUrl) URL.revokeObjectURL(dlUrl);
+  dlUrl = URL.createObjectURL(blob);
+  $("dlInfo").textContent =
+    `✅ 已生成单个视频文件（含${micTrack ? "画面+声音" : "画面"}）：${(blob.size/1048576).toFixed(1)} MB · 时长 ${fmtMs(recElapsed)} · 已自动开始下载`;
+  $("fileName").value = name;
+  const a = $("btnDownload");
+  a.href = dlUrl; a.download = name;
+  $("dlBar").classList.add("show");
+  const tmp = document.createElement("a");
+  tmp.href = dlUrl; tmp.download = name;
+  document.body.appendChild(tmp); tmp.click(); tmp.remove();
+  toast("视频已保存到本地下载目录");
+}
+function syncControls(){
+  const st = $("btnStart"), pa = $("btnPause"), so = $("btnStop");
+  st.classList.toggle("count", recState === "countdown");
+  pa.disabled = so.disabled = (recState === "idle" || recState === "countdown");
+  pa.textContent = recState === "paused" ? "继续" : "暂停";
+  $("recBadge").classList.toggle("show", recState === "rec" || recState === "paused");
+  $("recBadge").classList.toggle("paused", recState === "paused");
+  $("tpRecBadge").classList.toggle("show", recState === "rec" || recState === "paused");
+}
+
+/* =====================================================================
+ * 全屏提词器
+ * ===================================================================== */
+let tpY = 0, tpPlaying = false, tpLastTs = 0;
+function openPrompter(){
+  const text = $("scriptArea").value.trim();
+  if(!text){ toast("请先输入台词"); return; }
+  $("tpText").textContent = text;
+  applyTpStyle();
+  tpY = 0; tpPlaying = false; updateTpPlay();
+  $("tpScroll").style.transform = "translateY(0px)";
+  $("tpOverlay").classList.add("show");
+  tpLastTs = performance.now();
+  requestAnimationFrame(tpLoop);
+}
+function closePrompter(){ tpPlaying = false; $("tpOverlay").classList.remove("show"); }
+function applyTpStyle(){
+  const t = $("tpText");
+  t.style.fontSize = getFontSize() + "px";
+  t.style.lineHeight = getLine();
+  $("tpMirrorWrap").style.transform = $("ckPromptMirror").checked ? "scaleX(-1)" : "";
+  $("tpMirror").classList.toggle("on", $("ckPromptMirror").checked);
+}
+function updateTpPlay(){ $("tpPlay").textContent = tpPlaying ? "⏸ 暂停" : "▶ 播放"; }
+function tpLoop(ts){
+  if(!$("tpOverlay").classList.contains("show")) return;
+  if(tpPlaying){
+    const dt = Math.min(0.1, (ts - tpLastTs) / 1000);
+    tpY -= getSpeed() * dt;
+    const minY = -( ($("tpText").offsetHeight) - window.innerHeight * 0.5 );
+    if(tpY < minY){ tpY = minY; tpPlaying = false; updateTpPlay(); toast("已到底部"); }
+    $("tpScroll").style.transform = `translateY(${tpY}px)`;
+  }
+  tpLastTs = ts;
+  requestAnimationFrame(tpLoop);
+}
+/* 手势拖动定位（拖动时暂停自动滚动） */
+(function tpDrag(){
+  const wrap = $("tpMirrorWrap");
+  let startY = 0, baseY = 0, dragging = false;
+  wrap.addEventListener("pointerdown", e => {
+    dragging = true; startY = e.clientY; baseY = tpY;
+    wrap.setPointerCapture(e.pointerId);
+  });
+  wrap.addEventListener("pointermove", e => {
+    if(!dragging) return;
+    tpY = baseY + (e.clientY - startY);
+    $("tpScroll").style.transform = `translateY(${tpY}px)`;
+  });
+  wrap.addEventListener("pointerup", () => {
+    if(dragging){ dragging = false; if(tpPlaying) tpPlaying = false; updateTpPlay(); }
+  });
+})();
+
+/* =====================================================================
+ * 事件绑定
+ * ===================================================================== */
+$("btnGrant").addEventListener("click", async () => {
+  $("btnGrant").disabled = true; $("btnGrant").textContent = "正在开启…";
+  await getMic();
+  await setMode("front");
+  $("btnGrant").disabled = false; $("btnGrant").textContent = "重新尝试开启";
+});
+$("tabFront").addEventListener("click", () => setMode("front"));
+$("tabBack").addEventListener("click",  () => setMode("back"));
+$("tabDual").addEventListener("click",  () => setMode("dual"));
+
+$("btnLayoutStack").addEventListener("click", () => { dualLayout="stack"; syncLayoutOpts(); saveSettings(); });
+$("btnLayoutSide").addEventListener("click",  () => { dualLayout="side";  syncLayoutOpts(); saveSettings(); });
+$("btnLayoutPip").addEventListener("click",   () => { dualLayout="pip";   syncLayoutOpts(); saveSettings(); });
+$("btnPipPos").addEventListener("click", () => {
+  pipPos = { tl:"tr", tr:"br", br:"bl", bl:"tl" }[pipPos];
+  syncLayoutOpts(); saveSettings();
+});
+$("pipSize").addEventListener("input", e => { pipSize = +e.target.value; saveSettings(); });
+$("btnSwap").addEventListener("click", () => { frontMain = !frontMain; saveSettings(); toast(frontMain ? "已切换：前置为主画面" : "已切换：后置为主画面"); });
+$("ckMirrorFront").addEventListener("change", saveSettings);
+
+$("btnStart").addEventListener("click", () => {
+  if(recState === "idle") startRecord();
+  else if(recState === "countdown") cancelCountdown();
+});
+$("btnPause").addEventListener("click", () => recState === "paused" ? resumeRecord() : pauseRecord());
+$("btnStop").addEventListener("click", stopRecord);
+
+$("fileName").addEventListener("change", e => { $("btnDownload").download = e.target.value.trim() || $("fileName").value; });
+
+$("btnOpenPrompter").addEventListener("click", openPrompter);
+$("tpExit").addEventListener("click", closePrompter);
+$("tpPlay").addEventListener("click", () => {
+  if(!tpPlaying && tpY >= -($("tpText").offsetHeight - window.innerHeight*0.5) + 2 && tpY > 0){ tpY = 0; }
+  tpPlaying = !tpPlaying; tpLastTs = performance.now(); updateTpPlay();
+});
+$("tpSlower").addEventListener("click", () => { setSpeed(getSpeed()-10); saveSettings(); });
+$("tpFaster").addEventListener("click", () => { setSpeed(getSpeed()+10); saveSettings(); });
+$("tpSmaller").addEventListener("click", () => { setFontSize(getFontSize()-2); applyTpStyle(); saveSettings(); });
+$("tpBigger").addEventListener("click",  () => { setFontSize(getFontSize()+2); applyTpStyle(); saveSettings(); });
+$("tpMirror").addEventListener("click",  () => { $("ckPromptMirror").checked = !$("ckPromptMirror").checked; applyTpStyle(); saveSettings(); });
+
+$("speedRange").addEventListener("input", e => { setSpeed(+e.target.value); saveSettings(); });
+$("fontSizeRange").addEventListener("input", e => { setFontSize(+e.target.value); applyTpStyle(); saveSettings(); });
+$("lineRange").addEventListener("input", e => { setLine(+e.target.value); saveSettings(); });
+$("ckPromptMirror").addEventListener("change", () => { applyTpStyle(); saveSettings(); });
+$("scriptArea").addEventListener("input", saveSettings);
+
+/* 离开页面时释放设备 */
+window.addEventListener("pagehide", () => { stopStreams(); if(recorder && recorder.state !== "inactive") try{ recorder.stop(); }catch(e){} });
+
+/* ---------- 初始化 ---------- */
+loadSettings();
+applyTpStyle();
+syncTabs(); syncLayoutOpts(); syncControls();
+</script>
+</body>
+</html>
